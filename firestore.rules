@@ -1,0 +1,83 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: deny all reads and writes unless explicitly permitted below
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidPhotoBackup(data) {
+      return data.userId is string && data.userId == request.auth.uid && data.userId.size() <= 128 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 160 &&
+             data.capturedAtMillis is int && data.capturedAtMillis >= 0 &&
+             (!('latitude' in data) || data.latitude == null || (data.latitude is number && data.latitude >= -90.0 && data.latitude <= 90.0)) &&
+             (!('longitude' in data) || data.longitude == null || (data.longitude is number && data.longitude >= -180.0 && data.longitude <= 180.0)) &&
+             (!('altitudeMeters' in data) || data.altitudeMeters == null || data.altitudeMeters is number) &&
+             (!('accuracyMeters' in data) || data.accuracyMeters == null || (data.accuracyMeters is number && data.accuracyMeters >= 0.0)) &&
+             data.compassAzimuth is number && data.compassAzimuth >= 0.0 && data.compassAzimuth <= 360.0 &&
+             data.compassCardinal is string && data.compassCardinal.size() >= 1 && data.compassCardinal.size() <= 8 &&
+             data.addressLine is string && data.addressLine.size() <= 300 &&
+             data.cityState is string && data.cityState.size() <= 160 &&
+             data.country is string && data.country.size() <= 100 &&
+             data.customNote is string && data.customNote.size() <= 200 &&
+             data.templateName is string && data.templateName.size() >= 1 && data.templateName.size() <= 64 &&
+             data.width is int && data.width > 0 && data.width <= 20000 &&
+             data.height is int && data.height > 0 && data.height <= 20000 &&
+             data.thumbnailBase64 is string && data.thumbnailBase64.size() >= 1 && data.thumbnailBase64.size() <= 450000 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    match /users/{userId}/photo_backups/{backupId} {
+      allow get: if isSignedIn() && request.auth.uid == userId && isValidId(backupId);
+      allow list: if isSignedIn() && request.auth.uid == userId;
+
+      allow create: if isSignedIn() &&
+                       request.auth.uid == userId &&
+                       isValidId(backupId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'displayName', 'capturedAtMillis', 'compassAzimuth',
+                         'compassCardinal', 'addressLine', 'cityState', 'country',
+                         'customNote', 'templateName', 'width', 'height',
+                         'thumbnailBase64', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'displayName', 'capturedAtMillis', 'latitude', 'longitude',
+                         'altitudeMeters', 'accuracyMeters', 'compassAzimuth', 'compassCardinal',
+                         'addressLine', 'cityState', 'country', 'customNote', 'templateName',
+                         'width', 'height', 'thumbnailBase64', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidPhotoBackup(incoming());
+
+      allow update: if isSignedIn() &&
+                       request.auth.uid == userId &&
+                       isValidId(backupId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidPhotoBackup(incoming()) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'customNote', 'addressLine', 'cityState', 'country',
+                         'thumbnailBase64', 'updatedAt'
+                       ]);
+
+      allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(backupId);
+    }
+  }
+}

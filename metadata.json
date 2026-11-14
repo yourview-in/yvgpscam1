@@ -1,0 +1,6 @@
+{
+  "name": "YVGPSCAM",
+  "description": "Precision GPS Map Camera with live coordinates, mini-map overlay, EXIF geotagging, and custom YVGPSCAM logo photo stamps.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

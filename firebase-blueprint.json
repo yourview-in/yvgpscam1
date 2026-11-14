@@ -1,0 +1,114 @@
+{
+  "entities": {
+    "PhotoBackup": {
+      "title": "PhotoBackup",
+      "description": "Cloud-backed geotagged photo metadata and compressed JPEG preview belonging to a signed-in user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user who owns this backup."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Original captured filename."
+        },
+        "capturedAtMillis": {
+          "type": "integer",
+          "description": "Capture timestamp in epoch milliseconds."
+        },
+        "latitude": {
+          "type": "number",
+          "description": "Optional GPS latitude in decimal degrees."
+        },
+        "longitude": {
+          "type": "number",
+          "description": "Optional GPS longitude in decimal degrees."
+        },
+        "altitudeMeters": {
+          "type": "number",
+          "description": "Optional GPS altitude in meters."
+        },
+        "accuracyMeters": {
+          "type": "number",
+          "description": "Optional horizontal GPS accuracy in meters."
+        },
+        "compassAzimuth": {
+          "type": "number",
+          "description": "Compass azimuth in degrees (0-360)."
+        },
+        "compassCardinal": {
+          "type": "string",
+          "description": "Cardinal compass bearing label."
+        },
+        "addressLine": {
+          "type": "string",
+          "description": "Geocoded street address line."
+        },
+        "cityState": {
+          "type": "string",
+          "description": "City and state/region label."
+        },
+        "country": {
+          "type": "string",
+          "description": "Country name."
+        },
+        "customNote": {
+          "type": "string",
+          "description": "Optional field note stamped on the photo."
+        },
+        "templateName": {
+          "type": "string",
+          "description": "Stamp template name used when capturing."
+        },
+        "width": {
+          "type": "integer",
+          "description": "Original captured image width in pixels."
+        },
+        "height": {
+          "type": "integer",
+          "description": "Original captured image height in pixels."
+        },
+        "thumbnailBase64": {
+          "type": "string",
+          "description": "Compressed JPEG backup image encoded in Base64."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server-generated creation timestamp (clients must submit FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server-generated update timestamp (clients must submit FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "userId",
+        "displayName",
+        "capturedAtMillis",
+        "compassAzimuth",
+        "compassCardinal",
+        "addressLine",
+        "cityState",
+        "country",
+        "customNote",
+        "templateName",
+        "width",
+        "height",
+        "thumbnailBase64",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/photo_backups/{backupId}": {
+      "schema": {
+        "$ref": "#/entities/PhotoBackup"
+      },
+      "description": "Per-user cloud backup archive of captured geotagged photos."
+    }
+  }
+}

@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">YVGPSCAM</string>
+    <string name="nav_camera">Camera</string>
+    <string name="nav_gallery">Geotag Log</string>
+    <string name="nav_studio">Stamp Studio</string>
+    <string name="gps_locked">GPS LOCKED</string>
+    <string name="gps_coarse">COARSE GPS</string>
+    <string name="gps_acquiring">ACQUIRING GPS</string>
+    <string name="gps_denied">LOCATION OFF</string>
+    <string name="capture_photo">Capture geotagged photo</string>
+    <string name="switch_camera">Switch camera</string>
+    <string name="toggle_flash">Toggle flash mode</string>
+    <string name="toggle_grid">Toggle composition grid</string>
+    <string name="import_photo">Stamp existing photo</string>
+    <string name="permission_title_camera">Camera &amp; Location Access</string>
+    <string name="permission_desc_camera">YVGPSCAM uses your camera and GPS sensors to capture photos stamped with live coordinates, mini-map, compass heading, and EXIF geotags.</string>
+    <string name="grant_permissions">Enable Camera &amp; GPS</string>
+    <string name="open_settings">Open App Settings</string>
+    <string name="empty_gallery_title">No Geotagged Photos Yet</string>
+    <string name="empty_gallery_subtitle">Capture a photo in the Camera tab or stamp an existing photo from your gallery to build your YVGPSCAM field log.</string>
+</resources>
