@@ -240,7 +240,7 @@ private fun AdvanceOrClassicStampCard(
                         bitmap = activeMiniMap.asImageBitmap(),
                         contentDescription = "GPS mini-map preview",
                         contentScale = ContentScale.Crop,
-                        alpha = textOverlayAlpha,
+                        alpha = textOverlayAlpha.coerceAtLeast(0.90f),
                         modifier = Modifier.fillMaxSize()
                     )
                 }

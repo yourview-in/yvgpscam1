@@ -1,6 +1,7 @@
 package com.example.map
 
 import android.content.Context
+import com.example.BuildConfig
 import com.example.data.local.OfflineRegionDao
 import com.example.data.model.MapStyle
 import com.example.data.model.OfflineRegionEntity
@@ -11,6 +12,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.math.PI
 import kotlin.math.atan
@@ -66,28 +68,119 @@ class OfflineMapRepository(
         FileOutputStream(file).use { it.write(bytes) }
     }
 
-    fun fetchTileFromNetworkAndCache(z: Int, x: Int, y: Int, mapStyle: MapStyle = MapStyle.STANDARD): ByteArray? {
-        val url = when (mapStyle) {
-            MapStyle.STANDARD -> "https://tile.openstreetmap.org/$z/$x/$y.png"
-            MapStyle.SATELLITE -> "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/$z/$y/$x"
-            MapStyle.TERRAIN -> "https://tile.opentopomap.org/$z/$x/$y.png"
-            MapStyle.HYBRID -> "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/$z/$y/$x"
+    fun fetchGoogleStaticMapAndCache(
+        lat: Double,
+        lon: Double,
+        zoom: Int,
+        outputSizePx: Int,
+        mapStyle: MapStyle
+    ): ByteArray? {
+        if (!GoogleMapsConfig.isApiKeyConfigured()) return null
+        val qLat = String.format(Locale.US, "%.4f", lat)
+        val qLon = String.format(Locale.US, "%.4f", lon)
+        val cacheFile = File(tilesRootDir, "google_static/${mapStyle.name}_z${zoom}_${qLat}_${qLon}.png")
+        if (cacheFile.exists() && cacheFile.length() > 0L) {
+            return runCatching { cacheFile.readBytes() }.getOrNull()
         }
+
+        val googleMapType = when (mapStyle) {
+            MapStyle.STANDARD -> "roadmap"
+            MapStyle.SATELLITE -> "satellite"
+            MapStyle.TERRAIN -> "terrain"
+            MapStyle.HYBRID -> "hybrid"
+        }
+        val reqSize = outputSizePx.coerceIn(180, 400)
+        val url = String.format(
+            Locale.US,
+            "https://maps.googleapis.com/maps/api/staticmap?center=%.6f,%.6f&zoom=%d&size=%dx%d&scale=2&maptype=%s&key=%s",
+            lat,
+            lon,
+            zoom,
+            reqSize,
+            reqSize,
+            googleMapType,
+            BuildConfig.MAPS_API_KEY.trim()
+        )
+        val bytes = executeTileRequest(url)
+        if (bytes != null && isValidImageBytes(bytes)) {
+            cacheFile.parentFile?.mkdirs()
+            runCatching { FileOutputStream(cacheFile).use { it.write(bytes) } }
+            return bytes
+        }
+        return null
+    }
+
+    fun fetchHybridOverlayTile(z: Int, x: Int, y: Int): ByteArray? {
+        val cacheFile = File(tilesRootDir, "hybrid_overlay/$z/$x/$y.png")
+        if (cacheFile.exists() && cacheFile.length() > 0L) {
+            return runCatching { cacheFile.readBytes() }.getOrNull()
+        }
+        val urls = listOf(
+            "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/$z/$y/$x",
+            "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/$z/$y/$x"
+        )
+        for (url in urls) {
+            val bytes = executeTileRequest(url)
+            if (bytes != null && isValidImageBytes(bytes)) {
+                cacheFile.parentFile?.mkdirs()
+                runCatching { FileOutputStream(cacheFile).use { it.write(bytes) } }
+                return bytes
+            }
+        }
+        return null
+    }
+
+    fun fetchTileFromNetworkAndCache(z: Int, x: Int, y: Int, mapStyle: MapStyle = MapStyle.STANDARD): ByteArray? {
+        val candidateUrls = when (mapStyle) {
+            MapStyle.STANDARD -> listOf(
+                "https://basemaps.cartocdn.com/rastertiles/voyager/$z/$x/$y.png",
+                "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/$z/$y/$x",
+                "https://tile.openstreetmap.org/$z/$x/$y.png"
+            )
+            MapStyle.SATELLITE -> listOf(
+                "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/$z/$y/$x"
+            )
+            MapStyle.TERRAIN -> listOf(
+                "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/$z/$y/$x",
+                "https://tile.opentopomap.org/$z/$x/$y.png"
+            )
+            MapStyle.HYBRID -> listOf(
+                "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/$z/$y/$x"
+            )
+        }
+        for (url in candidateUrls) {
+            val bytes = executeTileRequest(url)
+            if (bytes != null && isValidImageBytes(bytes)) {
+                saveTileBytes(z, x, y, bytes, mapStyle)
+                return bytes
+            }
+        }
+        return null
+    }
+
+    private fun executeTileRequest(url: String): ByteArray? {
         val request = Request.Builder()
             .url(url)
-            .header("User-Agent", "YVGPSCAM-Android/1.0 (GPS Map Camera)")
+            .header("User-Agent", "YVGPSCAM-Android/1.0 (Geotag Camera; Android)")
             .build()
         return runCatching {
             httpClient.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
                     val bytes = response.body?.bytes()
-                    if (bytes != null && bytes.isNotEmpty()) {
-                        saveTileBytes(z, x, y, bytes, mapStyle)
-                        bytes
-                    } else null
-                } else null
+                    if (bytes != null && bytes.isNotEmpty()) bytes else null
+                } else {
+                    null
+                }
             }
         }.getOrNull()
+    }
+
+    private fun isValidImageBytes(bytes: ByteArray): Boolean {
+        if (bytes.size < 16) return false
+        val isPng = bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() && bytes[2] == 0x4E.toByte()
+        val isJpg = bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte()
+        val isWebp = bytes.size >= 12 && bytes[0] == 'R'.code.toByte() && bytes[8] == 'W'.code.toByte()
+        return isPng || isJpg || isWebp
     }
 
     fun estimateTilesForRegion(

@@ -6,9 +6,12 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.os.Bundle
 import android.view.KeyEvent
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -46,6 +49,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavDestination.Companion.hasRoute
@@ -56,6 +62,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import com.example.di.YvGpsCamContainer
+import com.example.ui.components.AppUpdateDialog
 import com.example.ui.screens.CameraScreen
 import com.example.ui.screens.CloudSyncRouteScreen
 import com.example.ui.screens.FileNameScreen
@@ -193,6 +200,35 @@ private fun YvGpsCamApp(
     )
 
     val stampConfig by cameraViewModel.stampConfig.collectAsStateWithLifecycle()
+    val appUpdateState by container.appUpdateCoordinator.updateState.collectAsStateWithLifecycle()
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    val updateFlowLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode != Activity.RESULT_OK) {
+            container.appUpdateCoordinator.dismissUpdateForNow()
+        }
+    }
+
+    LaunchedEffect(container) {
+        container.appUpdateCoordinator.checkForUpdates()
+    }
+
+    DisposableEffect(lifecycleOwner, hostActivity, updateFlowLauncher) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                hostActivity?.let { activity ->
+                    container.appUpdateCoordinator.onResumeCheck(activity, updateFlowLauncher)
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            container.appUpdateCoordinator.dispose()
+        }
+    }
 
     DisposableEffect(isMainCameraPage, cameraViewModel) {
         volumeInterceptor.onVolumeKey = if (isMainCameraPage) {
@@ -381,7 +417,19 @@ private fun YvGpsCamApp(
                                 onOpenPdfReport = { navController.navigate(PdfReportRoute()) },
                                 onOpenImageOnMap = { navController.navigate(ImageOnMapRoute) },
                                 onOpenOfflineMaps = { navigateTopLevel(OfflineMapsRoute) },
-                                onOpenCloudSync = { navigateTopLevel(CloudSyncRoute) }
+                                onOpenCloudSync = { navigateTopLevel(CloudSyncRoute) },
+                                onCheckForUpdates = {
+                                    container.appUpdateCoordinator.checkForUpdates(
+                                        forceShowIfDismissed = true,
+                                        onUpToDate = {
+                                            Toast.makeText(
+                                                localContext,
+                                                "YVGPSCAM v${BuildConfig.VERSION_NAME} is up to date",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                    )
+                                }
                             )
                         }
                         composable<ImageOnMapRoute> {
@@ -440,6 +488,23 @@ private fun YvGpsCamApp(
                         }
                     }
                 }
+            }
+
+            appUpdateState?.let { pendingUpdate ->
+                AppUpdateDialog(
+                    updateState = pendingUpdate,
+                    onUpdateNow = {
+                        hostActivity?.let { activity ->
+                            container.appUpdateCoordinator.startUpdate(activity, updateFlowLauncher)
+                        } ?: container.appUpdateCoordinator.openStoreListing(localContext, pendingUpdate.storeUrl)
+                    },
+                    onRestartToInstall = {
+                        container.appUpdateCoordinator.completeFlexibleUpdate()
+                    },
+                    onDismiss = {
+                        container.appUpdateCoordinator.dismissUpdateForNow()
+                    }
+                )
             }
         }
     }

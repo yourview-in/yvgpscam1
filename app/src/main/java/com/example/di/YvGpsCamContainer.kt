@@ -14,6 +14,7 @@ import com.example.data.local.StampPreferencesRepository
 import com.example.map.MiniMapTileRenderer
 import com.example.map.OfflineMapRepository
 import com.example.sensors.LocationTelemetryManager
+import com.example.util.AppUpdateCoordinator
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
@@ -71,5 +72,9 @@ class YvGpsCamContainer(context: Context) {
             mediaGateway = cloudMediaGateway,
             connectivityObserver = networkConnectivityObserver
         )
+    }
+
+    val appUpdateCoordinator: AppUpdateCoordinator by lazy {
+        AppUpdateCoordinator(appContext)
     }
 }

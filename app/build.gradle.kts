@@ -127,6 +127,8 @@ dependencies {
   // implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
   implementation(libs.maps.compose)
+  implementation(libs.play.app.update)
+  implementation(libs.play.app.update.ktx)
   implementation(libs.play.services.auth)
   implementation(libs.play.services.location)
   implementation(libs.play.services.maps)

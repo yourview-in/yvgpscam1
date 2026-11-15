@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
@@ -82,6 +83,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.BuildConfig
 import com.example.R
 import com.example.data.model.AppThemeMode
 import com.example.data.model.PhotoQualityLevel
@@ -115,6 +117,7 @@ fun SettingsScreen(
     onOpenImageOnMap: () -> Unit,
     onOpenOfflineMaps: () -> Unit,
     onOpenCloudSync: () -> Unit,
+    onCheckForUpdates: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -426,6 +429,14 @@ fun SettingsScreen(
                         subtitle = "Manage cloud backup account & sync queue",
                         onClick = onOpenCloudSync,
                         testTag = "settings_cloud_sync_row"
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    SettingsNavigationRow(
+                        icon = Icons.Default.SystemUpdate,
+                        title = "Check for Updates",
+                        subtitle = "Installed v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})",
+                        onClick = onCheckForUpdates,
+                        testTag = "settings_check_updates_row"
                     )
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     SettingsNavigationRow(

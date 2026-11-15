@@ -784,6 +784,95 @@ class ExampleRobolectricTest {
         report.file.delete()
         Unit
     }
+
+    @Test
+    fun `app update coordinator evaluates new version manifest and respects dismissal rules`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val coordinator = com.example.util.AppUpdateCoordinator(context)
+
+        // Same or older version should return null
+        val olderResult = coordinator.evaluateManifestJson(
+            manifestJson = """{"versionCode":1,"versionName":"1.0","mandatory":false}""",
+            currentVersionCode = 1,
+            currentVersionName = "1.0"
+        )
+        assertEquals(null, olderResult)
+
+        // Newer optional release should trigger popup state
+        val newerJson = """
+            {
+              "versionCode": 25,
+              "versionName": "2.5.0",
+              "releaseNotes": "Faster map tiles and cleaner stamp rendering.",
+              "mandatory": false,
+              "storeUrl": "https://play.google.com/store/apps/details?id=com.example"
+            }
+        """.trimIndent()
+        val detected = coordinator.evaluateManifestJson(
+            manifestJson = newerJson,
+            currentVersionCode = 1,
+            currentVersionName = "1.0"
+        )
+        assertNotNull(detected)
+        assertEquals(25, detected!!.availableVersionCode)
+        assertEquals("2.5.0", detected.availableVersionLabel)
+        assertFalse(detected.isImmediateRequired)
+        assertEquals(25, coordinator.updateState.value?.availableVersionCode)
+
+        // Dismissing persists skip for build 25 unless forceShow = true
+        coordinator.dismissUpdateForNow()
+        assertEquals(null, coordinator.updateState.value)
+
+        val suppressed = coordinator.evaluateManifestJson(
+            manifestJson = newerJson,
+            currentVersionCode = 1,
+            currentVersionName = "1.0",
+            forceShow = false
+        )
+        assertEquals(null, suppressed)
+
+        val forced = coordinator.evaluateManifestJson(
+            manifestJson = newerJson,
+            currentVersionCode = 1,
+            currentVersionName = "1.0",
+            forceShow = true
+        )
+        assertNotNull(forced)
+        assertEquals(25, forced!!.availableVersionCode)
+
+        // Mandatory update overrides previous dismissal
+        val mandatoryJson = """{"versionCode":25,"versionName":"2.5.0","mandatory":true}"""
+        val mandatoryState = coordinator.evaluateManifestJson(
+            manifestJson = mandatoryJson,
+            currentVersionCode = 1,
+            currentVersionName = "1.0",
+            forceShow = false
+        )
+        assertNotNull(mandatoryState)
+        assertTrue(mandatoryState!!.isImmediateRequired)
+        coordinator.dispose()
+    }
+
+    @Test
+    fun `realistic mini map renders cleanly without fix across all map styles`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = AppDatabase.getInstance(context)
+        val offlineRepo = OfflineMapRepository(context, db.offlineRegionDao())
+        val renderer = MiniMapTileRenderer(offlineRepo)
+
+        for (style in MapStyle.entries) {
+            val bmp = renderer.renderMiniMapBitmap(
+                latitude = null,
+                longitude = null,
+                outputSizePx = 280,
+                mapStyle = style,
+                offlineOnly = true
+            )
+            assertEquals(280, bmp.width)
+            assertEquals(280, bmp.height)
+            bmp.recycle()
+        }
+    }
 }
 
 @Implements(android.graphics.pdf.PdfDocument::class)

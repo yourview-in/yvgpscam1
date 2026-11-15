@@ -14,12 +14,14 @@ import com.example.data.model.MapStyle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import kotlin.math.cos
 import kotlin.math.floor
+import kotlin.math.sin
 
 class MiniMapTileRenderer(
     private val offlineMapRepository: OfflineMapRepository
 ) {
-    private val tileMemoryCache = object : LruCache<String, Bitmap>(96) {
+    private val tileMemoryCache = object : LruCache<String, Bitmap>(120) {
         override fun sizeOf(key: String, value: Bitmap): Int = 1
     }
 
@@ -37,11 +39,31 @@ class MiniMapTileRenderer(
         val canvas = Canvas(result)
 
         if (latitude == null || longitude == null) {
-            drawStyledVectorBase(canvas, outputSizePx, null, null, mapStyle, accentColorInt, isLightCard, hasFix = false)
+            drawRealisticVectorCartography(
+                canvas = canvas,
+                size = outputSizePx,
+                lat = null,
+                lon = null,
+                mapStyle = mapStyle,
+                hasFix = false
+            )
+            drawRealisticPinAndMapChrome(
+                canvas = canvas,
+                size = outputSizePx,
+                mapStyle = mapStyle,
+                accentColorInt = accentColorInt,
+                hasFix = false
+            )
             return@withContext result
         }
 
-        val tileBackdrop = composeTilesForLocation(
+        val googleStaticBackdrop = if (!offlineOnly) {
+            loadGoogleStaticMapBitmap(latitude, longitude, zoom, outputSizePx, mapStyle)
+        } else {
+            null
+        }
+
+        val tileBackdrop = googleStaticBackdrop ?: composeTilesForLocation(
             lat = latitude,
             lon = longitude,
             zoom = zoom,
@@ -49,32 +71,52 @@ class MiniMapTileRenderer(
             mapStyle = mapStyle,
             offlineOnly = offlineOnly
         )
-        val usedTileBackdrop = if (tileBackdrop != null) {
-            canvas.drawBitmap(tileBackdrop, 0f, 0f, null)
-            tileBackdrop.recycle()
-            val vignettePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.argb(36, 11, 16, 20)
-                style = Paint.Style.FILL
+
+        if (tileBackdrop != null) {
+            canvas.drawBitmap(tileBackdrop, null, RectF(0f, 0f, outputSizePx.toFloat(), outputSizePx.toFloat()), Paint(Paint.FILTER_BITMAP_FLAG))
+            if (googleStaticBackdrop == null) {
+                tileBackdrop.recycle()
             }
-            canvas.drawRect(0f, 0f, outputSizePx.toFloat(), outputSizePx.toFloat(), vignettePaint)
-            true
         } else {
-            drawStyledVectorBase(canvas, outputSizePx, latitude, longitude, mapStyle, accentColorInt, isLightCard, hasFix = true)
-            false
+            drawRealisticVectorCartography(
+                canvas = canvas,
+                size = outputSizePx,
+                lat = latitude,
+                lon = longitude,
+                mapStyle = mapStyle,
+                hasFix = true
+            )
         }
 
-        drawLocationReticleAndBadges(
+        drawRealisticPinAndMapChrome(
             canvas = canvas,
             size = outputSizePx,
-            lat = latitude,
-            lon = longitude,
-            zoom = zoom,
             mapStyle = mapStyle,
             accentColorInt = accentColorInt,
-            hasTiles = usedTileBackdrop
+            hasFix = true
         )
 
         result
+    }
+
+    private fun loadGoogleStaticMapBitmap(
+        lat: Double,
+        lon: Double,
+        zoom: Int,
+        outputSizePx: Int,
+        mapStyle: MapStyle
+    ): Bitmap? {
+        val qLat = String.format(Locale.US, "%.4f", lat)
+        val qLon = String.format(Locale.US, "%.4f", lon)
+        val memKey = "gstatic/${mapStyle.name}/$zoom/$qLat/$qLon"
+        tileMemoryCache.get(memKey)?.let { cached ->
+            if (!cached.isRecycled) return cached
+        }
+        val bytes = offlineMapRepository.fetchGoogleStaticMapAndCache(lat, lon, zoom, outputSizePx, mapStyle)
+            ?: return null
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+        tileMemoryCache.put(memKey, bmp)
+        return bmp
     }
 
     private fun composeTilesForLocation(
@@ -100,7 +142,6 @@ class MiniMapTileRenderer(
         val top = (centerPixelY - cropHalf).toInt().coerceIn(0, 768 - cropHalf.toInt() * 2)
         val cropSize = (cropHalf.toInt() * 2).coerceAtLeast(1)
 
-        // Fetch only the tiles that actually intersect the crop rectangle (1–4 tiles instead of 9)
         val minDx = if (left < 256) -1 else 0
         val maxDx = if (left + cropSize > 512) 1 else 0
         val minDy = if (top < 256) -1 else 0
@@ -117,12 +158,14 @@ class MiniMapTileRenderer(
                 val tileBitmap = loadSingleTile(zoom, tx, ty, mapStyle, offlineOnly)
                 if (tileBitmap != null) {
                     loadedCount++
-                    gridCanvas.drawBitmap(
-                        tileBitmap,
-                        ((dx + 1) * 256).toFloat(),
-                        ((dy + 1) * 256).toFloat(),
-                        null
-                    )
+                    val drawX = ((dx + 1) * 256).toFloat()
+                    val drawY = ((dy + 1) * 256).toFloat()
+                    gridCanvas.drawBitmap(tileBitmap, drawX, drawY, null)
+                    if (mapStyle == MapStyle.HYBRID && !offlineOnly) {
+                        loadHybridOverlayBitmap(zoom, tx, ty)?.let { overlayBmp ->
+                            gridCanvas.drawBitmap(overlayBmp, drawX, drawY, null)
+                        }
+                    }
                 }
             }
         }
@@ -145,7 +188,7 @@ class MiniMapTileRenderer(
 
     private fun loadSingleTile(z: Int, x: Int, y: Int, mapStyle: MapStyle, offlineOnly: Boolean): Bitmap? {
         val key = "${mapStyle.name}/$z/$x/$y"
-        tileMemoryCache.get(key)?.let { return it }
+        tileMemoryCache.get(key)?.let { if (!it.isRecycled) return it }
 
         val cachedFile = offlineMapRepository.getTileFile(z, x, y, mapStyle)
         if (cachedFile.exists() && cachedFile.length() > 0L) {
@@ -166,199 +209,589 @@ class MiniMapTileRenderer(
         return bmp
     }
 
-    private fun drawStyledVectorBase(
+    private fun loadHybridOverlayBitmap(z: Int, x: Int, y: Int): Bitmap? {
+        val key = "HYBRID_OVERLAY/$z/$x/$y"
+        tileMemoryCache.get(key)?.let { if (!it.isRecycled) return it }
+        val bytes = offlineMapRepository.fetchHybridOverlayTile(z, x, y) ?: return null
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        if (bmp != null) {
+            tileMemoryCache.put(key, bmp)
+        }
+        return bmp
+    }
+
+    private fun drawRealisticVectorCartography(
         canvas: Canvas,
         size: Int,
         lat: Double?,
         lon: Double?,
         mapStyle: MapStyle,
-        accentColorInt: Int,
-        isLightCard: Boolean,
         hasFix: Boolean
     ) {
         val s = size.toFloat()
-        val cx = s / 2f
-        val cy = s / 2f
-        val seedOffset = if (lat != null && lon != null) {
-            (((lat * 1000.0) % 1.0 + (lon * 1000.0) % 1.0) * 0.16).toFloat()
-        } else 0.08f
+        val shiftX = if (lat != null && lon != null) {
+            (((sin(lat * 31.7) * 0.5 + 0.5) - 0.5) * 0.14 * s).toFloat()
+        } else 0f
+        val shiftY = if (lat != null && lon != null) {
+            (((cos(lon * 31.7) * 0.5 + 0.5) - 0.5) * 0.14 * s).toFloat()
+        } else 0f
 
         when (mapStyle) {
-            MapStyle.SATELLITE, MapStyle.HYBRID -> {
-                // Aerial earth/canopy & parcel patchwork
-                canvas.drawColor(Color.rgb(24, 42, 34))
-                val patchPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-                patchPaint.color = Color.rgb(34, 62, 46)
-                canvas.drawRect(0f, 0f, s * (0.48f + seedOffset * 0.4f), s * 0.55f, patchPaint)
-                patchPaint.color = Color.rgb(48, 56, 44)
-                canvas.drawRect(s * 0.44f, s * 0.36f, s, s, patchPaint)
-                patchPaint.color = Color.rgb(22, 54, 72)
-                val river = Path().apply {
-                    moveTo(0f, s * (0.68f - seedOffset))
-                    quadTo(s * 0.5f, s * (0.58f + seedOffset), s, s * (0.76f - seedOffset * 0.5f))
-                    lineTo(s, s * (0.86f - seedOffset * 0.5f))
-                    quadTo(s * 0.5f, s * (0.68f + seedOffset), 0f, s * (0.78f - seedOffset))
-                    close()
-                }
-                canvas.drawPath(river, patchPaint)
-
-                val canopyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = Color.argb(95, 58, 94, 64)
-                    style = Paint.Style.FILL
-                }
-                canvas.drawCircle(s * 0.25f, s * 0.3f, s * 0.16f, canopyPaint)
-                canvas.drawCircle(s * 0.72f, s * 0.28f, s * 0.14f, canopyPaint)
-
-                val roadAlpha = if (mapStyle == MapStyle.HYBRID) 215 else 145
-                val roadColor = if (mapStyle == MapStyle.HYBRID) Color.argb(roadAlpha, 245, 224, 140) else Color.argb(roadAlpha, 210, 206, 188)
-                val roadPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = roadColor
-                    strokeWidth = (s / if (mapStyle == MapStyle.HYBRID) 64f else 80f).coerceAtLeast(1.8f)
-                    style = Paint.Style.STROKE
-                }
-                canvas.drawLine(0f, s * (0.42f + seedOffset * 0.3f), s, s * (0.46f - seedOffset * 0.2f), roadPaint)
-                canvas.drawLine(s * 0.52f, 0f, s * 0.47f, s, roadPaint)
-            }
-
-            MapStyle.TERRAIN -> {
-                // Hypsometric terrain relief & contour rings
-                canvas.drawColor(Color.rgb(32, 46, 36))
-                val hillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-                hillPaint.color = Color.rgb(44, 64, 48)
-                canvas.drawCircle(cx - s * 0.14f, cy - s * 0.1f, s * 0.46f, hillPaint)
-                hillPaint.color = Color.rgb(66, 84, 58)
-                canvas.drawCircle(cx - s * 0.08f, cy - s * 0.06f, s * 0.30f, hillPaint)
-                hillPaint.color = Color.rgb(98, 108, 76)
-                canvas.drawCircle(cx, cy, s * 0.16f, hillPaint)
-
-                val contourPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = Color.argb(115, 224, 212, 174)
-                    strokeWidth = (s / 175f).coerceAtLeast(1.1f)
-                    style = Paint.Style.STROKE
-                }
-                listOf(0.14f, 0.24f, 0.35f, 0.48f).forEach { radiusFactor ->
-                    canvas.drawCircle(cx - s * 0.04f, cy - s * 0.03f, s * radiusFactor, contourPaint)
-                }
-
-                val ridgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = Color.argb(110, 168, 212, 180)
-                    strokeWidth = (s / 110f).coerceAtLeast(1.4f)
-                    style = Paint.Style.STROKE
-                    pathEffect = DashPathEffect(floatArrayOf(s * 0.04f, s * 0.025f), 0f)
-                }
-                val ridge = Path().apply {
-                    moveTo(0f, s * (0.3f + seedOffset))
-                    quadTo(s * 0.48f, s * (0.5f - seedOffset), s, s * (0.34f + seedOffset * 0.4f))
-                }
-                canvas.drawPath(ridge, ridgePaint)
-            }
-
-            MapStyle.STANDARD -> {
-                val bgColor = if (isLightCard) Color.rgb(227, 236, 242) else Color.rgb(16, 28, 38)
-                canvas.drawColor(bgColor)
-
-                val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = if (isLightCard) Color.argb(46, 20, 45, 65) else Color.argb(42, 148, 166, 181)
-                    strokeWidth = (s / 220f).coerceAtLeast(1f)
-                    style = Paint.Style.STROKE
-                }
-                val step = s / 6f
-                for (i in 1..5) {
-                    val pos = step * i
-                    canvas.drawLine(pos, 0f, pos, s, gridPaint)
-                    canvas.drawLine(0f, pos, s, pos, gridPaint)
-                }
-
-                val arterialPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = if (isLightCard) Color.argb(145, 56, 95, 130) else Color.argb(120, 56, 189, 248)
-                    strokeWidth = (s / 55f).coerceAtLeast(2.2f)
-                    style = Paint.Style.STROKE
-                }
-                val road = Path().apply {
-                    moveTo(0f, s * (0.32f + seedOffset))
-                    quadTo(s * 0.45f, s * (0.52f - seedOffset), s, s * (0.38f + seedOffset * 0.5f))
-                }
-                canvas.drawPath(road, arterialPaint)
-                canvas.drawLine(s * (0.48f + seedOffset * 0.3f), 0f, s * (0.52f - seedOffset * 0.2f), s, arterialPaint)
-
-                val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = Color.argb(72, Color.red(accentColorInt), Color.green(accentColorInt), Color.blue(accentColorInt))
-                    strokeWidth = (s / 180f).coerceAtLeast(1.2f)
-                    style = Paint.Style.STROKE
-                    pathEffect = DashPathEffect(floatArrayOf(s * 0.03f, s * 0.02f), 0f)
-                }
-                canvas.drawCircle(cx, cy, s * 0.22f, ringPaint)
-            }
-        }
-
-        if (!hasFix) {
-            val noFixPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = if (isLightCard && mapStyle == MapStyle.STANDARD) Color.rgb(70, 90, 105) else Color.rgb(210, 224, 232)
-                textSize = s * 0.088f
-                textAlign = Paint.Align.CENTER
-                typeface = Typeface.MONOSPACE
-            }
-            canvas.drawText("NO GPS FIX", cx, cy + s * 0.25f, noFixPaint)
+            MapStyle.STANDARD -> drawRealisticRoadMap(canvas, s, shiftX, shiftY, hasFix)
+            MapStyle.SATELLITE -> drawRealisticSatelliteMap(canvas, s, shiftX, shiftY, withRoadLabels = false)
+            MapStyle.TERRAIN -> drawRealisticTerrainMap(canvas, s, shiftX, shiftY)
+            MapStyle.HYBRID -> drawRealisticSatelliteMap(canvas, s, shiftX, shiftY, withRoadLabels = true)
         }
     }
 
-    private fun drawLocationReticleAndBadges(
+    private fun drawRealisticRoadMap(
+        canvas: Canvas,
+        s: Float,
+        dx: Float,
+        dy: Float,
+        hasFix: Boolean
+    ) {
+        // Warm daylight map base (Google / Apple Maps style)
+        canvas.drawColor(Color.rgb(242, 239, 230))
+
+        // Parks & wooded green zones
+        val parkFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(198, 232, 180)
+            style = Paint.Style.FILL
+        }
+        val parkDeep = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(178, 219, 158)
+            style = Paint.Style.FILL
+        }
+        val leftPark = Path().apply {
+            moveTo(0f, 0f)
+            lineTo(s * 0.40f + dx * 0.5f, 0f)
+            quadTo(s * 0.34f + dx, s * 0.24f, s * 0.18f + dx * 0.5f, s * 0.36f + dy * 0.4f)
+            lineTo(0f, s * 0.33f)
+            close()
+        }
+        canvas.drawPath(leftPark, parkFill)
+        canvas.drawRoundRect(
+            RectF(s * 0.58f + dx * 0.4f, s * 0.62f + dy * 0.4f, s * 0.96f, s * 0.92f),
+            s * 0.05f,
+            s * 0.05f,
+            parkFill
+        )
+        canvas.drawCircle(s * 0.14f, s * 0.15f, s * 0.065f, parkDeep)
+        canvas.drawCircle(s * 0.22f, s * 0.20f, s * 0.045f, parkDeep)
+        canvas.drawCircle(s * 0.78f + dx * 0.3f, s * 0.76f + dy * 0.3f, s * 0.06f, parkDeep)
+
+        // Winding river / creek on right-bottom diagonal
+        val riverPath = Path().apply {
+            moveTo(s * 0.80f + dx * 0.3f, 0f)
+            cubicTo(
+                s * 0.74f + dx * 0.4f, s * 0.30f,
+                s * 0.92f + dx * 0.3f, s * 0.58f,
+                s * 0.85f + dx * 0.2f, s
+            )
+        }
+        val riverStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(154, 208, 248)
+            style = Paint.Style.STROKE
+            strokeWidth = s * 0.072f
+            strokeCap = Paint.Cap.ROUND
+        }
+        val riverBank = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(129, 191, 236)
+            style = Paint.Style.STROKE
+            strokeWidth = s * 0.082f
+            strokeCap = Paint.Cap.ROUND
+        }
+        canvas.drawPath(riverPath, riverBank)
+        canvas.drawPath(riverPath, riverStroke)
+
+        // Building blocks along city parcels
+        val bldgFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(228, 224, 214)
+            style = Paint.Style.FILL
+        }
+        val bldgBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(209, 204, 192)
+            style = Paint.Style.STROKE
+            strokeWidth = (s / 240f).coerceAtLeast(0.8f)
+        }
+        val blocks = listOf(
+            RectF(s * 0.44f, s * 0.08f, s * 0.56f, s * 0.17f),
+            RectF(s * 0.59f, s * 0.11f, s * 0.68f, s * 0.19f),
+            RectF(s * 0.31f, s * 0.31f, s * 0.42f, s * 0.41f),
+            RectF(s * 0.50f, s * 0.27f, s * 0.63f, s * 0.36f),
+            RectF(s * 0.12f, s * 0.47f, s * 0.24f, s * 0.56f),
+            RectF(s * 0.33f, s * 0.54f, s * 0.45f, s * 0.64f),
+            RectF(s * 0.54f, s * 0.49f, s * 0.66f, s * 0.57f),
+            RectF(s * 0.14f, s * 0.72f, s * 0.27f, s * 0.83f),
+            RectF(s * 0.37f, s * 0.77f, s * 0.48f, s * 0.87f)
+        )
+        blocks.forEach { r ->
+            val shifted = RectF(r.left + dx * 0.35f, r.top + dy * 0.35f, r.right + dx * 0.35f, r.bottom + dy * 0.35f)
+            canvas.drawRoundRect(shifted, s * 0.012f, s * 0.012f, bldgFill)
+            canvas.drawRoundRect(shifted, s * 0.012f, s * 0.012f, bldgBorder)
+        }
+
+        // Secondary local street network (two-pass cased lines)
+        val localRoads = listOf(
+            Path().apply { moveTo(0f, s * 0.24f + dy * 0.5f); lineTo(s, s * 0.21f + dy * 0.4f) },
+            Path().apply { moveTo(0f, s * 0.67f + dy * 0.5f); lineTo(s * 0.78f, s * 0.65f + dy * 0.3f) },
+            Path().apply { moveTo(s * 0.28f + dx * 0.5f, 0f); lineTo(s * 0.31f + dx * 0.4f, s) },
+            Path().apply { moveTo(s * 0.70f + dx * 0.4f, 0f); lineTo(s * 0.66f + dx * 0.3f, s) }
+        )
+        drawCasedRoads(canvas, localRoads, widthPx = s * 0.026f, casingColor = Color.rgb(212, 207, 196), fillColor = Color.WHITE)
+
+        // Collector avenues (soft cream-yellow)
+        val collectorRoads = listOf(
+            Path().apply {
+                moveTo(0f, s * 0.44f + dy * 0.5f)
+                quadTo(s * 0.48f, s * 0.46f + dy * 0.3f, s, s * 0.42f + dy * 0.4f)
+            }
+        )
+        drawCasedRoads(canvas, collectorRoads, widthPx = s * 0.036f, casingColor = Color.rgb(220, 198, 144), fillColor = Color.rgb(255, 245, 202))
+
+        // Main arterial highway + roundabout intersection (Google Maps amber-gold)
+        val highway = listOf(
+            Path().apply {
+                moveTo(s * 0.47f + dx * 0.4f, 0f)
+                cubicTo(
+                    s * 0.46f + dx * 0.3f, s * 0.35f,
+                    s * 0.54f + dx * 0.3f, s * 0.68f,
+                    s * 0.49f + dx * 0.2f, s
+                )
+            }
+        )
+        drawCasedRoads(canvas, highway, widthPx = s * 0.048f, casingColor = Color.rgb(224, 166, 46), fillColor = Color.rgb(251, 211, 90))
+
+        // Subtle roundabout circle at center highway crossing
+        val rx = s * 0.485f + dx * 0.3f
+        val ry = s * 0.45f + dy * 0.35f
+        canvas.drawCircle(rx, ry, s * 0.045f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(224, 166, 46) })
+        canvas.drawCircle(rx, ry, s * 0.034f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(251, 211, 90) })
+        canvas.drawCircle(rx, ry, s * 0.015f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(198, 232, 180) })
+
+        // Map street & park typography with white halo
+        drawHaloedMapLabel(canvas, if (hasFix) "Park Ave" else "Market St", s * 0.18f, s * 0.42f + dy * 0.3f, s * 0.048f, darkBackground = false)
+        drawHaloedMapLabel(canvas, "Central Park", s * 0.17f, s * 0.14f, s * 0.045f, darkBackground = false)
+        drawHaloedMapLabel(canvas, "River Rd", s * 0.72f, s * 0.62f, s * 0.044f, darkBackground = false)
+    }
+
+    private fun drawRealisticSatelliteMap(
+        canvas: Canvas,
+        s: Float,
+        dx: Float,
+        dy: Float,
+        withRoadLabels: Boolean
+    ) {
+        // Rich dark earth mosaic base
+        canvas.drawColor(Color.rgb(38, 56, 39))
+
+        val fieldPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        // Natural land / soil / pasture patchwork
+        fieldPaint.color = Color.rgb(52, 74, 46)
+        canvas.drawRect(0f, 0f, s * 0.46f + dx * 0.5f, s * 0.52f + dy * 0.5f, fieldPaint)
+        fieldPaint.color = Color.rgb(68, 78, 52)
+        canvas.drawRect(s * 0.46f + dx * 0.5f, 0f, s, s * 0.42f + dy * 0.4f, fieldPaint)
+        fieldPaint.color = Color.rgb(46, 63, 44)
+        canvas.drawRect(0f, s * 0.52f + dy * 0.5f, s * 0.58f + dx * 0.3f, s, fieldPaint)
+        fieldPaint.color = Color.rgb(62, 68, 52)
+        canvas.drawRect(s * 0.58f + dx * 0.3f, s * 0.42f + dy * 0.4f, s, s, fieldPaint)
+
+        // River / canal channel
+        val waterPath = Path().apply {
+            moveTo(0f, s * 0.74f + dy * 0.3f)
+            cubicTo(s * 0.35f, s * 0.66f + dy * 0.4f, s * 0.65f, s * 0.84f, s, s * 0.76f)
+        }
+        canvas.drawPath(
+            waterPath,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(25, 58, 76)
+                style = Paint.Style.STROKE
+                strokeWidth = s * 0.09f
+                strokeCap = Paint.Cap.ROUND
+            }
+        )
+        canvas.drawPath(
+            waterPath,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(34, 77, 99)
+                style = Paint.Style.STROKE
+                strokeWidth = s * 0.055f
+                strokeCap = Paint.Cap.ROUND
+            }
+        )
+
+        // Asphalt roads
+        val asphalt = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(60, 64, 70)
+            style = Paint.Style.STROKE
+            strokeWidth = s * 0.044f
+        }
+        canvas.drawLine(0f, s * 0.43f + dy * 0.4f, s, s * 0.46f + dy * 0.3f, asphalt)
+        canvas.drawLine(s * 0.50f + dx * 0.4f, 0f, s * 0.48f + dx * 0.3f, s, asphalt)
+
+        // Subtle white dashed center stripe
+        val dash = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(120, 225, 228, 232)
+            style = Paint.Style.STROKE
+            strokeWidth = (s / 190f).coerceAtLeast(1f)
+            pathEffect = DashPathEffect(floatArrayOf(s * 0.03f, s * 0.025f), 0f)
+        }
+        canvas.drawLine(0f, s * 0.43f + dy * 0.4f, s, s * 0.46f + dy * 0.3f, dash)
+
+        // Building roofs with directional ground shadows
+        val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(110, 14, 18, 15)
+            style = Paint.Style.FILL
+        }
+        val roofLight = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(162, 156, 144)
+            style = Paint.Style.FILL
+        }
+        val roofSlate = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(112, 118, 124)
+            style = Paint.Style.FILL
+        }
+        val roofs = listOf(
+            RectF(s * 0.16f, s * 0.25f, s * 0.28f, s * 0.35f) to true,
+            RectF(s * 0.60f, s * 0.22f, s * 0.72f, s * 0.33f) to false,
+            RectF(s * 0.22f, s * 0.52f, s * 0.34f, s * 0.61f) to false,
+            RectF(s * 0.63f, s * 0.51f, s * 0.77f, s * 0.60f) to true
+        )
+        val shadowOffset = s * 0.016f
+        roofs.forEach { (r, light) ->
+            val shifted = RectF(r.left + dx * 0.3f, r.top + dy * 0.3f, r.right + dx * 0.3f, r.bottom + dy * 0.3f)
+            canvas.drawRect(
+                shifted.left + shadowOffset,
+                shifted.top + shadowOffset,
+                shifted.right + shadowOffset,
+                shifted.bottom + shadowOffset,
+                shadowPaint
+            )
+            canvas.drawRect(shifted, if (light) roofLight else roofSlate)
+        }
+
+        // Dense tree canopy clusters with shadows
+        val treeShadow = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(90, 10, 18, 12) }
+        val treeDark = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(30, 58, 32) }
+        val treeMid = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(44, 82, 44) }
+        val trees = listOf(
+            Triple(0.14f, 0.14f, 0.055f),
+            Triple(0.37f, 0.16f, 0.048f),
+            Triple(0.84f, 0.20f, 0.06f),
+            Triple(0.15f, 0.86f, 0.05f),
+            Triple(0.82f, 0.63f, 0.052f)
+        )
+        trees.forEach { (tx, ty, tr) ->
+            val cx = s * tx + dx * 0.25f
+            val cy = s * ty + dy * 0.25f
+            val rad = s * tr
+            canvas.drawCircle(cx + shadowOffset * 0.8f, cy + shadowOffset * 0.8f, rad, treeShadow)
+            canvas.drawCircle(cx, cy, rad, treeDark)
+            canvas.drawCircle(cx - rad * 0.2f, cy - rad * 0.2f, rad * 0.65f, treeMid)
+        }
+
+        if (withRoadLabels) {
+            val hybridRoads = listOf(
+                Path().apply { moveTo(0f, s * 0.43f + dy * 0.4f); lineTo(s, s * 0.46f + dy * 0.3f) },
+                Path().apply { moveTo(s * 0.50f + dx * 0.4f, 0f); lineTo(s * 0.48f + dx * 0.3f, s) }
+            )
+            drawCasedRoads(
+                canvas,
+                hybridRoads,
+                widthPx = s * 0.032f,
+                casingColor = Color.argb(190, 214, 152, 32),
+                fillColor = Color.argb(220, 252, 224, 120)
+            )
+            drawHaloedMapLabel(canvas, "Hwy 101", s * 0.22f, s * 0.39f + dy * 0.4f, s * 0.048f, darkBackground = true)
+            drawHaloedMapLabel(canvas, "Main Blvd", s * 0.69f, s * 0.43f + dy * 0.3f, s * 0.044f, darkBackground = true)
+        }
+    }
+
+    private fun drawRealisticTerrainMap(
+        canvas: Canvas,
+        s: Float,
+        dx: Float,
+        dy: Float
+    ) {
+        // Warm topographic relief base
+        canvas.drawColor(Color.rgb(236, 234, 221))
+
+        val forestPatch = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(208, 227, 186)
+            style = Paint.Style.FILL
+        }
+        val ridgeShade = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(218, 210, 184)
+            style = Paint.Style.FILL
+        }
+        val highPeak = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(245, 240, 224)
+            style = Paint.Style.FILL
+        }
+
+        // Organic elevation relief shapes
+        canvas.drawOval(RectF(-s * 0.1f + dx, s * 0.05f + dy, s * 0.72f + dx, s * 0.76f + dy), forestPatch)
+        canvas.drawOval(RectF(s * 0.15f + dx, s * 0.16f + dy, s * 0.68f + dx, s * 0.62f + dy), ridgeShade)
+        canvas.drawOval(RectF(s * 0.28f + dx, s * 0.25f + dy, s * 0.56f + dx, s * 0.49f + dy), highPeak)
+
+        // Smoothed topographic contour loops
+        val contourLight = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(145, 146, 158, 122)
+            strokeWidth = (s / 210f).coerceAtLeast(0.9f)
+            style = Paint.Style.STROKE
+        }
+        val contourMajor = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(185, 122, 134, 98)
+            strokeWidth = (s / 140f).coerceAtLeast(1.3f)
+            style = Paint.Style.STROKE
+        }
+
+        val cx = s * 0.42f + dx * 0.7f
+        val cy = s * 0.37f + dy * 0.7f
+        listOf(0.08f, 0.14f, 0.21f, 0.29f, 0.38f, 0.48f).forEachIndexed { idx, factor ->
+            val rx = s * factor * 1.15f
+            val ry = s * factor * 0.85f
+            val contour = Path().apply {
+                moveTo(cx - rx, cy)
+                cubicTo(cx - rx, cy - ry * 1.1f, cx + rx * 0.9f, cy - ry * 0.9f, cx + rx, cy + ry * 0.1f)
+                cubicTo(cx + rx * 1.05f, cy + ry * 0.95f, cx - rx * 0.85f, cy + ry * 1.1f, cx - rx, cy)
+                close()
+            }
+            canvas.drawPath(contour, if (idx % 2 == 0) contourMajor else contourLight)
+        }
+
+        // Mountain stream
+        val stream = Path().apply {
+            moveTo(s * 0.82f, 0f)
+            cubicTo(s * 0.70f, s * 0.35f, s * 0.88f, s * 0.68f, s * 0.66f, s)
+        }
+        canvas.drawPath(
+            stream,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(122, 189, 236)
+                style = Paint.Style.STROKE
+                strokeWidth = s * 0.032f
+                strokeCap = Paint.Cap.ROUND
+            }
+        )
+
+        // Scenic white-cased road + dashed trail
+        drawCasedRoads(
+            canvas,
+            listOf(Path().apply { moveTo(0f, s * 0.62f + dy * 0.3f); quadTo(s * 0.45f, s * 0.52f, s, s * 0.58f) }),
+            widthPx = s * 0.030f,
+            casingColor = Color.rgb(198, 189, 166),
+            fillColor = Color.WHITE
+        )
+        canvas.drawPath(
+            Path().apply { moveTo(s * 0.22f, 0f); quadTo(s * 0.36f, s * 0.46f, s * 0.28f, s) },
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(138, 102, 68)
+                style = Paint.Style.STROKE
+                strokeWidth = (s / 130f).coerceAtLeast(1.4f)
+                pathEffect = DashPathEffect(floatArrayOf(s * 0.03f, s * 0.02f), 0f)
+            }
+        )
+
+        drawHaloedMapLabel(canvas, "540m", cx, cy - s * 0.02f, s * 0.044f, darkBackground = false)
+        drawHaloedMapLabel(canvas, "Ridge Trl", s * 0.29f, s * 0.82f, s * 0.042f, darkBackground = false)
+    }
+
+    private fun drawCasedRoads(
+        canvas: Canvas,
+        paths: List<Path>,
+        widthPx: Float,
+        casingColor: Int,
+        fillColor: Int
+    ) {
+        val casingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = casingColor
+            style = Paint.Style.STROKE
+            strokeWidth = (widthPx + 2.4f).coerceAtLeast(2.8f)
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+        val innerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = fillColor
+            style = Paint.Style.STROKE
+            strokeWidth = widthPx.coerceAtLeast(1.6f)
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+        paths.forEach { canvas.drawPath(it, casingPaint) }
+        paths.forEach { canvas.drawPath(it, innerPaint) }
+    }
+
+    private fun drawHaloedMapLabel(
+        canvas: Canvas,
+        text: String,
+        x: Float,
+        y: Float,
+        textSizePx: Float,
+        darkBackground: Boolean
+    ) {
+        val haloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = if (darkBackground) Color.argb(215, 16, 22, 28) else Color.argb(235, 255, 255, 255)
+            style = Paint.Style.STROKE
+            strokeWidth = (textSizePx * 0.28f).coerceAtLeast(2f)
+            textSize = textSizePx
+            textAlign = Paint.Align.CENTER
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+        }
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = if (darkBackground) Color.rgb(245, 248, 252) else Color.rgb(71, 85, 105)
+            style = Paint.Style.FILL
+            textSize = textSizePx
+            textAlign = Paint.Align.CENTER
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+        }
+        canvas.drawText(text, x, y, haloPaint)
+        canvas.drawText(text, x, y, textPaint)
+    }
+
+    private fun drawRealisticPinAndMapChrome(
         canvas: Canvas,
         size: Int,
-        lat: Double,
-        lon: Double,
-        zoom: Int,
         mapStyle: MapStyle,
         accentColorInt: Int,
-        hasTiles: Boolean
+        hasFix: Boolean
     ) {
         val s = size.toFloat()
-        val cx = s / 2f
-        val cy = s / 2f
+        val tipX = s / 2f
+        val tipY = s * 0.56f
 
-        val haloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(64, Color.red(accentColorInt), Color.green(accentColorInt), Color.blue(accentColorInt))
+        // Subtle GPS accuracy halo around pin tip
+        if (hasFix) {
+            canvas.drawCircle(
+                tipX,
+                tipY,
+                s * 0.13f,
+                Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.argb(38, Color.red(accentColorInt), Color.green(accentColorInt), Color.blue(accentColorInt))
+                    style = Paint.Style.FILL
+                }
+            )
+            canvas.drawCircle(
+                tipX,
+                tipY,
+                s * 0.13f,
+                Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.argb(115, 59, 130, 246)
+                    style = Paint.Style.STROKE
+                    strokeWidth = (s / 210f).coerceAtLeast(1f)
+                }
+            )
+        }
+
+        // Pin tip ground shadow ellipse
+        canvas.drawOval(
+            RectF(tipX - s * 0.055f, tipY - s * 0.016f, tipX + s * 0.055f, tipY + s * 0.022f),
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.argb(95, 15, 23, 42)
+                style = Paint.Style.FILL
+            }
+        )
+
+        // Realistic teardrop red map pin (head centered above tipY)
+        val headR = s * 0.088f
+        val headCy = tipY - headR * 1.95f
+        val pinPath = Path().apply {
+            moveTo(tipX, tipY)
+            cubicTo(
+                tipX - headR * 0.92f, tipY - headR * 0.85f,
+                tipX - headR, headCy + headR * 0.25f,
+                tipX - headR, headCy
+            )
+            arcTo(
+                RectF(tipX - headR, headCy - headR, tipX + headR, headCy + headR),
+                180f,
+                180f,
+                false
+            )
+            cubicTo(
+                tipX + headR, headCy + headR * 0.25f,
+                tipX + headR * 0.92f, tipY - headR * 0.85f,
+                tipX, tipY
+            )
+            close()
+        }
+
+        canvas.drawPath(
+            pinPath,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(234, 67, 53) // Google Maps crimson red
+                style = Paint.Style.FILL
+            }
+        )
+        canvas.drawPath(
+            pinPath,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(179, 20, 18)
+                style = Paint.Style.STROKE
+                strokeWidth = (s / 170f).coerceAtLeast(1.2f)
+            }
+        )
+        // White pin bullseye hole
+        canvas.drawCircle(
+            tipX,
+            headCy,
+            headR * 0.38f,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE
+                style = Paint.Style.FILL
+            }
+        )
+
+        // Subtle "Maps" badge at bottom-left (IMG_4847 look, minimal obstruction)
+        val isDarkMap = mapStyle == MapStyle.SATELLITE || mapStyle == MapStyle.HYBRID
+        val pillBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = if (isDarkMap) Color.argb(175, 15, 23, 30) else Color.argb(215, 255, 255, 255)
             style = Paint.Style.FILL
         }
-        canvas.drawCircle(cx, cy, s * 0.12f, haloPaint)
+        val mapsBadge = RectF(s * 0.045f, s * 0.86f, s * 0.29f, s * 0.955f)
+        canvas.drawRoundRect(mapsBadge, s * 0.028f, s * 0.028f, pillBg)
+        canvas.drawText(
+            "Maps",
+            mapsBadge.centerX(),
+            mapsBadge.centerY() + s * 0.018f,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = if (isDarkMap) Color.WHITE else Color.rgb(30, 41, 59)
+                textSize = s * 0.052f
+                textAlign = Paint.Align.CENTER
+                typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            }
+        )
 
-        val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            style = Paint.Style.FILL
-        }
-        canvas.drawCircle(cx, cy, s * 0.055f, ringPaint)
+        // Compact top-right minimal North mark
+        val northBadge = RectF(s * 0.83f, s * 0.045f, s * 0.955f, s * 0.165f)
+        canvas.drawRoundRect(northBadge, s * 0.03f, s * 0.03f, pillBg)
+        canvas.drawText(
+            "N",
+            northBadge.centerX(),
+            northBadge.centerY() + s * 0.021f,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = if (isDarkMap) Color.rgb(245, 197, 24) else Color.rgb(220, 38, 38)
+                textSize = s * 0.058f
+                textAlign = Paint.Align.CENTER
+                typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            }
+        )
 
-        val corePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = accentColorInt
-            style = Paint.Style.FILL
+        if (!hasFix) {
+            val statusBadge = RectF(s * 0.16f, s * 0.045f, s * 0.78f, s * 0.155f)
+            canvas.drawRoundRect(statusBadge, s * 0.035f, s * 0.035f, pillBg)
+            canvas.drawText(
+                "GPS Sync...",
+                statusBadge.centerX(),
+                statusBadge.centerY() + s * 0.02f,
+                Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = if (isDarkMap) Color.WHITE else Color.rgb(30, 41, 59)
+                    textSize = s * 0.050f
+                    textAlign = Paint.Align.CENTER
+                    typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+                }
+            )
         }
-        canvas.drawCircle(cx, cy, s * 0.036f, corePaint)
-
-        val badgeBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(198, 11, 16, 20)
-            style = Paint.Style.FILL
-        }
-        val nRect = RectF(s * 0.78f, s * 0.06f, s * 0.94f, s * 0.20f)
-        canvas.drawRoundRect(nRect, s * 0.04f, s * 0.04f, badgeBg)
-
-        val nText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = accentColorInt
-            textSize = s * 0.085f
-            textAlign = Paint.Align.CENTER
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-        }
-        canvas.drawText("N", nRect.centerX(), nRect.centerY() + s * 0.03f, nText)
-
-        val pillRect = RectF(s * 0.05f, s * 0.81f, s * 0.95f, s * 0.95f)
-        canvas.drawRoundRect(pillRect, s * 0.04f, s * 0.04f, badgeBg)
-        val pillText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = s * 0.066f
-            textAlign = Paint.Align.CENTER
-            typeface = Typeface.MONOSPACE
-        }
-        val tag = if (hasTiles) "${mapStyle.shortLabel} Z$zoom" else mapStyle.shortLabel
-        val coordSummary = String.format(Locale.US, "%.3f, %.3f · %s", lat, lon, tag)
-        canvas.drawText(coordSummary, pillRect.centerX(), pillRect.centerY() + s * 0.024f, pillText)
     }
 }

@@ -384,7 +384,7 @@ class PhotoStampRenderer(private val context: Context) {
                 contentLeft + leftModuleWidth,
                 cardRect.bottom - cardPadding
             )
-            drawRoundedBitmap(canvas, activeMiniMap, mapRect, 14f * baseScale, foregroundAlphaInt)
+            drawRoundedBitmap(canvas, activeMiniMap, mapRect, 14f * baseScale, foregroundAlphaInt.coerceAtLeast(220))
             val mapBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = Color.argb(90, 255, 255, 255)
                 style = Paint.Style.STROKE
@@ -554,23 +554,22 @@ class PhotoStampRenderer(private val context: Context) {
         radius: Float,
         alphaInt: Int = 255
     ) {
-        val scaled = Bitmap.createScaledBitmap(
-            bitmap,
-            rect.width().roundToInt().coerceAtLeast(1),
-            rect.height().roundToInt().coerceAtLeast(1),
-            true
-        )
-        val shader = BitmapShader(scaled, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+        val bw = bitmap.width.toFloat().coerceAtLeast(1f)
+        val bh = bitmap.height.toFloat().coerceAtLeast(1f)
+        val scale = maxOf(rect.width() / bw, rect.height() / bh)
+        val dx = rect.centerX() - (bw * scale) / 2f
+        val dy = rect.centerY() - (bh * scale) / 2f
+        val shader = BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
         val matrix = android.graphics.Matrix().apply {
-            setTranslate(rect.left, rect.top)
+            setScale(scale, scale)
+            postTranslate(dx, dy)
         }
         shader.setLocalMatrix(matrix)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
             this.shader = shader
             this.alpha = alphaInt.coerceIn(0, 255)
         }
         canvas.drawRoundRect(rect, radius, radius, paint)
-        if (scaled !== bitmap) scaled.recycle()
     }
 
     private fun loadTypeface(font: StampFont): Typeface {
